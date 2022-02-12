@@ -413,7 +413,7 @@ impl<V: Clone> LinearMap<V>{
         };
 
         // Resize and fill the initial value.
-        lm.resize_fill(value);
+        lm.resize_and_fill_default(lm.capacity(), value);
 
         lm
     }
@@ -442,8 +442,14 @@ impl<V: Clone> LinearMap<V> {
         self.vec_.reserve(len_more);
     }
 
-    /// Resize the LinearMap full with initial value.
-    pub fn resize_fill(&mut self, value: V) -> () {
+    /// Change the capacity and resize the LinearMap full with initial value.
+    pub fn reserve_and_fill_default(&mut self, len_more: usize, value: V) -> () {
+        self.vec_.reserve(len_more);
+        self.vec_.resize(self.capacity(), value);
+    }
+
+    // Resize and fill defaults without change the capacity.
+    pub fn resize_and_fill_default(&mut self, len: usize, value: V) -> () {
         self.vec_.resize(self.capacity(), value);
     }
 
@@ -472,7 +478,6 @@ impl<V: Clone> LinearMap<V> {
 /// with invalid StrongId. And we use .clone() instead of move to insert value which could be less
 /// effiecient. However, in this way we can keep the capacity always same as length.
 impl<V: Clone + Default> LinearMap<V> {
-    // TODO: Implement Default as the fillers.
     /// Allow to insert the value in an incontinuous way (not recommanded!).
     pub fn insert<K: Validable>(&mut self, key: &K, value: &mut V) -> () {
         // K represents a StrongId type which contains primitive value.

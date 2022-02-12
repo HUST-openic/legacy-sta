@@ -1,5 +1,5 @@
 use core::{panic};
-use std::{collections::HashMap, vec};
+use std::{collections::HashMap, vec, io::sink};
 
 use crate::blocksta::base::*;
 
@@ -229,7 +229,7 @@ pub struct TimingGraph {
     node_in_edges: LinearMap<Vec<EdgeId>>,
     /// All out edges for each node, containing launch edge.
     node_out_edges: LinearMap<Vec<EdgeId>>,
-    // All corresponding node levels.
+    // Corresponding levels for all nodes.
     node_levels: LinearMap<LevelId>,
 
     // Edge data.
@@ -247,7 +247,7 @@ pub struct TimingGraph {
 
     // Auxilary graph-level info.
 
-    /// All nodes represented by LevelId.
+    /// LevelIds.
     level_ids: LinearMap<LevelId>,
     /// All nodes in each level.
     level_nodes: LinearMap<Vec<NodeId>>,
@@ -317,8 +317,130 @@ impl TimingGraph {
         new_nodes
     }
 
-    fn force_levelize(&self) {
+    // Clear previous levelization if it exists and levelize the timing graph, 
+    // also records primary outputs.
+    fn force_levelize(&mut self) {
+        // Clear previous levelization.
+        self.level_nodes.clear();
+        self.level_ids.clear();
+        self.node_levels.clear();
+        self.primary_inputs.clear();
+        self.logical_outputs.clear();
 
+        // Allocate space for the first level, initialized with empty vector..
+        self.level_nodes.resize_and_fill_default(1, vec![]);
+        
+        // Initialize tags for each node's fanin edge numbers.  
+        let mut node_fanin_remaining: Vec<usize> = vec![];
+        node_fanin_remaining.resize(self.nodes().size(), 0);
+
+        for node_id in self.nodes().into_iter() {
+            let mut node_fanin: usize = 0;
+            for edge in self.node_in_edges(&node_id) {
+                if self.edge_disabled(&edge) {
+                    continue;
+                }
+
+                // If the input edge for this node is available, count + 1.
+                node_fanin += 1;
+            }
+
+            // Record the number of fanin edges for this node.
+            node_fanin_remaining[node_id.inner()] = node_fanin;
+
+            // If the node has no fanin, record it in the first level.
+            // If it's a source node, also record it as primary inputs.
+            if node_fanin == 0 {
+                self.level_nodes[LevelId::new(0)].push(node_id.clone());
+
+                match self.node_type(&node_id) {
+                    NodeType::Source => self.primary_inputs.push(node_id),
+                    _ => (),
+                }
+            }
+        }
+
+        // Walk the graph from primary inputs (no fanin) to generate a topological sort.
+        
+        // Start from level 1 and record it.
+        let mut level_idx: usize = 0;
+        self.level_ids.push_back(LevelId::new(level_idx));
+
+        // Initialize empty value.
+        let mut last_level: Vec<NodeId> = vec![];
+
+        let mut inserted_node_in_level = true;
+
+        while inserted_node_in_level {
+            inserted_node_in_level = false;
+
+            // Iterate over the current level of nodes.
+            let current_level_nodes = self.level_nodes[LevelId::new(level_idx)].clone();
+            for node_id in current_level_nodes.iter() {
+                for edge_id in self.node_out_edges(node_id) {
+                    if self.edge_disabled(&edge_id) {
+                        continue;
+                    }
+
+                    // Get the sink_node for this edge and reduce the remaining fanin tag,
+                    // as it will be iterated.
+                    let sink_node = self.edge_sink_node(&edge_id).clone();
+                    assert!(node_fanin_remaining[sink_node.inner()] > 0,
+                            "Levelization error, {:?} has fanin edges less than 0.", &sink_node);
+                    node_fanin_remaining[sink_node.inner()] -= 1;
+
+                    // If the sink_node fanin edges have all been iterated 
+                    // and the sink_node has out edges,
+                    // Change the level size and put it into the next level.
+                    if node_fanin_remaining[sink_node.inner()] == 0 {
+                        if self.node_out_edges(&sink_node).size() != 0 {
+                            // Ensure there is space by allocating the next level if required.
+                            self.level_nodes.resize_and_fill_default(level_idx + 2, vec![]);
+
+                            self.level_nodes[LevelId::new(level_idx + 1)].push(sink_node.clone());
+
+                            inserted_node_in_level = true;
+                        } else {
+                            // If the sink_node has no out_edges, it's in the last level.
+                            last_level.push(sink_node);
+                        }
+                    }
+                }
+            }
+
+            // If a node (sink) is inserted to level_nodes during this iteration,
+            // Add level index and records it.
+            if inserted_node_in_level {
+                level_idx += 1;
+                self.level_ids.push_back(LevelId::new(level_idx));
+            }
+        }
+
+        // Add the last level to the end of the levelization.
+        self.level_nodes.push_back(last_level.clone());
+        level_idx += 1;
+        self.level_ids.push_back(LevelId::new(level_idx));
+
+        // Add SINK type nodes in the last level to logical outputs.
+        // Note that we only do this for sinks, since non-sink nodes may end up
+        // in the last level (e.g. due to breaking combinational loops)
+        // - tatum official
+        for node_id in last_level.iter() {
+            match self.node_type(node_id) {
+                NodeType::Sink => self.logical_outputs.push(node_id.clone()),
+                _ => (),
+            }
+        }
+
+        // Build reverse node -> level look up.
+        self.node_levels.resize_and_fill_default(self.nodes().size(), Default::default());
+        for level_id in self.level_ids.l_iter() {
+            for node_id in self.level_nodes[level_id.clone()].iter() {
+                self.node_levels[node_id.clone()] = level_id.clone();
+            }
+        }
+
+        self.is_levelized = true;
     }
 
     fn valid_node_id(&self, node_id: &NodeId) -> bool { //bool
@@ -923,7 +1045,6 @@ impl TimingGraph {
         }
     }
 
-    //TODO: Finish this one.
     pub fn compress(&mut self) -> GraphIdMaps {
         let mut node_id_map = compress_ids(&self.node_ids);
         let mut edge_id_map = compress_ids(&self.edge_ids);
@@ -940,10 +1061,10 @@ impl TimingGraph {
         }
     }
 
-    /// Levelize the graph
-    pub fn levelize(&self) {
+    /// Levelize the graph by force.
+    pub fn levelize(&mut self) {
         if !self.is_levelized {
-            self.force_levelize(); //TODO: Implement.
+            self.force_levelize();
         }
     }
 
