@@ -1,5 +1,7 @@
 # A rust library for OPENIC static timing analysis
 
+This repo is suspened.
+
 ## tatum project
 
 Currently trying to rewrite the tatum STA engine in rust.
